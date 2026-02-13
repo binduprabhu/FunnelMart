@@ -1,0 +1,25 @@
+.radioLabel,
+.toggleLabel {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    cursor: pointer;
+    padding: 0.75rem;
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: var(--radius);
+    border: 1px solid var(--card-border);
+    transition: var(--transition);
+    flex: 1;
+}
+
+.radioLabel:hover,
+.toggleLabel:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.radioLabel input,
+.toggleLabel input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--primary);
+}
