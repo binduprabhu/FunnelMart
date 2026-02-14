@@ -105,7 +105,7 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: HTTP (Nginx -> Next.js)
+          Description: HTTP Nginx to NextJS
         - IpProtocol: tcp
           FromPort: 3001
           ToPort: 3001
@@ -376,7 +376,7 @@ Outputs:
 
   SSHCommand:
     Description: SSH into the instance
-    Value: !Sub "ssh -i <your-key>.pem ec2-user@${EC2Instance.PublicIp}"
+    Value: !Sub "ssh -i your-key.pem ec2-user@${EC2Instance.PublicIp}"
 
   DbtRunCommand:
     Description: Run dbt models via SSH
