@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: funnelmart-postgres
+    environment:
+      POSTGRES_USER: funnelmart
+      POSTGRES_PASSWORD: funnelmart
+      POSTGRES_DB: funnelmart
+    ports:
+      - "5432:5432"
+    volumes:
+      - funnelmart_pgdata:/var/lib/postgresql/data
+
+volumes:
+  funnelmart_pgdata:

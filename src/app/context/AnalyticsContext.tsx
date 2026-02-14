@@ -13,29 +13,35 @@ const AnalyticsContext = createContext<AnalyticsContextType | undefined>(undefin
 
 const APP_VERSION = '0.1.0';
 
+const getOrCreateUserId = (): string => {
+    if (typeof window === 'undefined') return 'server_side';
+    let id = localStorage.getItem('ff_user_id');
+    if (!id || id.trim() === '') {
+        id = `anon_${Math.random().toString(36).substring(2, 15)}`;
+        localStorage.setItem('ff_user_id', id);
+    }
+    return id;
+};
+
+const getOrCreateSessionId = (): string => {
+    if (typeof window === 'undefined') return 'server_side';
+    let id = sessionStorage.getItem('ff_session_id');
+    if (!id || id.trim() === '') {
+        id = `sess_${Math.random().toString(36).substring(2, 15)}`;
+        sessionStorage.setItem('ff_session_id', id);
+    }
+    return id;
+};
+
 export function AnalyticsProvider({ children }: { children: React.ReactNode }) {
-    const [userId, setUserId] = useState<string>('');
-    const [sessionId, setSessionId] = useState<string>('');
+    const [, setUserId] = useState<string>('');
+    const [, setSessionId] = useState<string>('');
     const [utms, setUtms] = useState<Record<string, string>>({});
 
     useEffect(() => {
-        // 1. User ID (LocalStorage)
-        let storedUserId = localStorage.getItem('fm_user_id');
-        if (!storedUserId) {
-            storedUserId = `anon_${Math.random().toString(36).substring(2, 11)}`;
-            localStorage.setItem('fm_user_id', storedUserId);
-        }
-        setUserId(storedUserId);
+        setUserId(getOrCreateUserId());
+        setSessionId(getOrCreateSessionId());
 
-        // 2. Session ID (SessionStorage)
-        let storedSessionId = sessionStorage.getItem('fm_session_id');
-        if (!storedSessionId) {
-            storedSessionId = `sess_${Math.random().toString(36).substring(2, 11)}`;
-            sessionStorage.setItem('fm_session_id', storedSessionId);
-        }
-        setSessionId(storedSessionId);
-
-        // 3. UTMs (URL -> SessionStorage)
         const urlParams = new URLSearchParams(window.location.search);
         const newUtms: Record<string, string> = {};
         ['utm_source', 'utm_medium', 'utm_campaign'].forEach(key => {
@@ -43,22 +49,30 @@ export function AnalyticsProvider({ children }: { children: React.ReactNode }) {
             if (val) newUtms[key] = val;
         });
 
-        let savedUtms = JSON.parse(sessionStorage.getItem('fm_utms') || '{}');
+        let savedUtms = JSON.parse(sessionStorage.getItem('ff_utms') || '{}');
         if (Object.keys(newUtms).length > 0) {
             savedUtms = { ...savedUtms, ...newUtms };
-            sessionStorage.setItem('fm_utms', JSON.stringify(savedUtms));
+            sessionStorage.setItem('ff_utms', JSON.stringify(savedUtms));
         }
         setUtms(savedUtms);
     }, []);
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const track = async (eventName: AnalyticsEvent['event_name'], properties: Record<string, any> = {}) => {
-        const event = {
+        const uId = getOrCreateUserId();
+        const sId = getOrCreateSessionId();
+
+        if (!uId || !sId) {
+            console.error('[Analytics Safeguard] Aborted event emission due to missing IDs:', { eventName, uId, sId });
+            return;
+        }
+
+        const event: AnalyticsEvent = {
             event_id: uuidv4(),
             event_name: eventName,
             event_time: new Date().toISOString(),
-            user_id: userId,
-            session_id: sessionId,
+            user_id: uId,
+            session_id: sId,
             device_type: window.innerWidth < 768 ? 'mobile' : 'desktop',
             country: Intl.DateTimeFormat().resolvedOptions().timeZone,
             utm_source: utms.utm_source || null,
@@ -68,11 +82,9 @@ export function AnalyticsProvider({ children }: { children: React.ReactNode }) {
             properties: properties
         };
 
-        // 1. Store in local debug log
         const existingLogs = JSON.parse(localStorage.getItem('fm_events') || '[]');
-        localStorage.setItem('fm_events', JSON.stringify([...existingLogs, event]));
+        localStorage.setItem('fm_events', JSON.stringify([...existingLogs.slice(-49), event]));
 
-        // 2. Send to backend (to be handled in Chunk 2/3)
         try {
             await fetch('/api/events', {
                 method: 'POST',

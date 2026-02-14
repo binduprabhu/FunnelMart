@@ -1,0 +1,16 @@
+version: 2
+
+models:
+  - name: stg_events
+    description: "Staged events with typed fields extracted from properties JSON."
+    columns:
+      - name: event_id
+        tests:
+          - unique
+          - not_null
+      - name: event_name
+        tests:
+          - not_null
+      - name: event_time
+        tests:
+          - not_null

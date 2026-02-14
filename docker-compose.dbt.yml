@@ -1,0 +1,17 @@
+services:
+  dbt:
+    build:
+      context: .
+      dockerfile: dbt/Dockerfile
+    container_name: funnelmart-dbt
+    working_dir: /usr/app
+    volumes:
+      - ./dbt:/usr/app
+      - ./dbt_profiles:/root/.dbt
+    networks:
+      - funnelmart_net
+
+networks:
+  funnelmart_net:
+    external: true
+    name: funnelmart_default

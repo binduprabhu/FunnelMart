@@ -34,4 +34,9 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+
+# dbt
+/dbt_profiles
+/dbt/target
+/dbt/dbt_packages
+/dbt/logs
