@@ -1,0 +1,383 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  FunnelMart All-in-One – single EC2 instance running Postgres, Kafka (KRaft),
+  dbt, Next.js frontend with Nginx reverse-proxy, Kafka UI, and Metabase.
+
+# ──────────────────────────────────────────────────────────────
+# Parameters
+# ──────────────────────────────────────────────────────────────
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small, t3.medium, t3.large]
+    Description: EC2 instance size (t3.micro is free-tier eligible)
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 key pair for SSH access
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+    Description: Amazon Linux 2023 AMI (auto-resolved via SSM)
+
+  GitHubRepo:
+    Type: String
+    Default: https://github.com/binduprabhu/FunnelMart.git
+    Description: Git repository URL to clone
+
+# ──────────────────────────────────────────────────────────────
+# Resources
+# ──────────────────────────────────────────────────────────────
+Resources:
+
+  # ── VPC ──
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: funnelmart-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: funnelmart-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: funnelmart-public-subnet
+
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: funnelmart-rt
+
+  DefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref RouteTable
+
+  # ── Security Group ──
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FunnelMart - allow HTTP, SSH, Kafka UI, Metabase
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+          Description: SSH
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP (Nginx -> Next.js)
+        - IpProtocol: tcp
+          FromPort: 3001
+          ToPort: 3001
+          CidrIp: 0.0.0.0/0
+          Description: Metabase UI
+        - IpProtocol: tcp
+          FromPort: 8081
+          ToPort: 8081
+          CidrIp: 0.0.0.0/0
+          Description: Kafka UI
+      Tags:
+        - Key: Name
+          Value: funnelmart-sg
+
+  # ── IAM Role (SSM access) ──
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: funnelmart-role
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref InstanceRole
+
+  # ── EC2 Instance ──
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: AttachGateway
+    Properties:
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: funnelmart-server
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          set -euo pipefail
+
+          # ── 1. Install Docker + Compose ──
+          dnf update -y
+          dnf install -y docker git
+          systemctl enable docker && systemctl start docker
+          usermod -aG docker ec2-user
+
+          # Install Docker Compose plugin
+          mkdir -p /usr/local/lib/docker/cli-plugins
+          curl -SL "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-$(uname -m)" \
+            -o /usr/local/lib/docker/cli-plugins/docker-compose
+          chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+          # ── 2. Clone the repo ──
+          mkdir -p /opt/funnelmart
+          cd /opt/funnelmart
+          git clone ${GitHubRepo} app
+          cd app
+
+          # ── 3. Write unified docker-compose.prod.yml ──
+          cat > docker-compose.prod.yml << 'COMPOSE_EOF'
+          services:
+            # ── Postgres ──
+            postgres:
+              image: postgres:16
+              container_name: funnelmart-postgres
+              restart: always
+              environment:
+                POSTGRES_USER: funnelmart
+                POSTGRES_PASSWORD: funnelmart
+                POSTGRES_DB: funnelmart
+              volumes:
+                - pgdata:/var/lib/postgresql/data
+                - ./scripts/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+
+            # ── Kafka (KRaft, no Zookeeper) ──
+            kafka:
+              image: apache/kafka:latest
+              container_name: funnelmart-kafka
+              restart: always
+              environment:
+                KAFKA_NODE_ID: "1"
+                KAFKA_PROCESS_ROLES: "broker,controller"
+                KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+                KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+                KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+                KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+                KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+                KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+                KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+                KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+                KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+                KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+                KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+              volumes:
+                - kafkadata:/var/kafka-data
+
+            # ── Kafka UI ──
+            kafka-ui:
+              image: provectuslabs/kafka-ui:latest
+              container_name: funnelmart-kafka-ui
+              restart: always
+              ports:
+                - "8081:8080"
+              environment:
+                KAFKA_CLUSTERS_0_NAME: funnelmart
+                KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+              depends_on:
+                - kafka
+
+            # ── Next.js App ──
+            app:
+              build:
+                context: .
+                dockerfile: Dockerfile
+              container_name: funnelmart-app
+              restart: always
+              environment:
+                KAFKA_BROKER: kafka:9092
+                DATABASE_URL: postgres://funnelmart:funnelmart@postgres:5432/funnelmart
+              depends_on:
+                - postgres
+                - kafka
+
+            # ── Nginx Reverse Proxy ──
+            nginx:
+              image: nginx:alpine
+              container_name: funnelmart-nginx
+              restart: always
+              ports:
+                - "80:80"
+              volumes:
+                - ./infra/nginx.conf:/etc/nginx/nginx.conf:ro
+              depends_on:
+                - app
+
+            # ── dbt (run manually: docker compose exec dbt dbt run) ──
+            dbt:
+              build:
+                context: .
+                dockerfile: dbt/Dockerfile
+              container_name: funnelmart-dbt
+              working_dir: /usr/app
+              volumes:
+                - ./dbt:/usr/app
+                - ./dbt_profiles:/root/.dbt
+              depends_on:
+                - postgres
+              entrypoint: ["tail", "-f", "/dev/null"]
+
+            # ── Metabase ──
+            metabase:
+              image: metabase/metabase:latest
+              container_name: funnelmart-metabase
+              restart: always
+              ports:
+                - "3001:3000"
+              environment:
+                MB_DB_TYPE: postgres
+                MB_DB_HOST: postgres
+                MB_DB_PORT: 5432
+                MB_DB_DBNAME: funnelmart
+                MB_DB_USER: funnelmart
+                MB_DB_PASS: funnelmart
+              depends_on:
+                - postgres
+
+          volumes:
+            pgdata:
+            kafkadata:
+          COMPOSE_EOF
+
+          # ── 4. Write Nginx config ──
+          mkdir -p infra
+          cat > infra/nginx.conf << 'NGINX_EOF'
+          worker_processes auto;
+          events { worker_connections 1024; }
+
+          http {
+            upstream nextjs {
+              server app:3000;
+            }
+
+            server {
+              listen 80;
+              server_name _;
+
+              location / {
+                proxy_pass         http://nextjs;
+                proxy_http_version 1.1;
+                proxy_set_header   Upgrade $http_upgrade;
+                proxy_set_header   Connection 'upgrade';
+                proxy_set_header   Host $host;
+                proxy_set_header   X-Real-IP $remote_addr;
+                proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header   X-Forwarded-Proto $scheme;
+                proxy_cache_bypass $http_upgrade;
+              }
+            }
+          }
+          NGINX_EOF
+
+          # ── 5. Write dbt profiles ──
+          mkdir -p dbt_profiles
+          cat > dbt_profiles/profiles.yml << 'DBT_EOF'
+          funnelmart:
+            target: dev
+            outputs:
+              dev:
+                type: postgres
+                host: postgres
+                user: funnelmart
+                password: funnelmart
+                port: 5432
+                dbname: funnelmart
+                schema: analytics
+                threads: 2
+          DBT_EOF
+
+          # ── 6. Build & Start everything ──
+          docker compose -f docker-compose.prod.yml up -d --build
+
+          # ── 7. Wait for Postgres and run dbt ──
+          echo "Waiting for Postgres..."
+          sleep 15
+          docker compose -f docker-compose.prod.yml exec -T dbt dbt run || true
+
+# ──────────────────────────────────────────────────────────────
+# Outputs
+# ──────────────────────────────────────────────────────────────
+Outputs:
+  PublicIP:
+    Description: Public IP of the FunnelMart server
+    Value: !GetAtt EC2Instance.PublicIp
+
+  FrontendURL:
+    Description: FunnelMart storefront
+    Value: !Sub "http://${EC2Instance.PublicIp}"
+
+  MetabaseURL:
+    Description: Metabase analytics dashboard
+    Value: !Sub "http://${EC2Instance.PublicIp}:3001"
+
+  KafkaUIURL:
+    Description: Kafka UI monitoring
+    Value: !Sub "http://${EC2Instance.PublicIp}:8081"
+
+  SSHCommand:
+    Description: SSH into the instance
+    Value: !Sub "ssh -i <your-key>.pem ec2-user@${EC2Instance.PublicIp}"
+
+  DbtRunCommand:
+    Description: Run dbt models via SSH
+    Value: "cd /opt/funnelmart/app && docker compose -f docker-compose.prod.yml exec dbt dbt run"
