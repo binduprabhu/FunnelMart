@@ -73,5 +73,4 @@ For deploying the entire stack to AWS, a CloudFormation template is provided in 
 - **Facts**: `fct_purchases`, `fct_sessions`, `fct_funnel_steps`, `fct_users`.
 - **Marts**: `mart_funnel_daily`, `mart_revenue_daily`, `mart_retention_weekly`.
 
----
-*Created by Antigravity for FunnelMart.*
+
